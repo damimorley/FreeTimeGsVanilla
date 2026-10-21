@@ -103,6 +103,30 @@ uv sync --locked
 source .venv/bin/activate
 ```
 
+### Cloud GPU setup (Runpod, PKU-DyMVHumans)
+
+Tested on an H100 pod (NGC image, `nvcc` 12.8) with a network volume at `/workspace`.
+
+- The network volume does not support `chmod`, so the repo, `.venv`, `~/roma-env`
+  and the uv cache live on the container disk under `/root`. Only data, results,
+  `.env` and the two setup scripts live on `/workspace`.
+- `/root` is wiped when the pod stops; rebuild it with `bash /workspace/setup_env.sh`.
+- `/workspace/bootstrap.sh` sets `UV_CACHE_DIR`, `XDG_CACHE_HOME` and `TORCH_HOME`
+  under `/root/.cache`, `TORCH_CUDA_ARCH_LIST=9.0`, installs uv if missing and
+  loads the R2 keys from `/workspace/.env`. Source it in every new shell.
+- `/workspace/setup_env.sh` clones the repo, runs `uv sync --locked` without
+  `torch-scatter`, `gsplat` and `fused-ssim`, then builds those three with
+  `uv pip install --no-build-isolation` against the locked `torch==2.10.0+cu128`.
+  With build isolation, uv puts the newest PyTorch (CUDA 13) in the build
+  environment and the extensions fail with a CUDA version mismatch. After this,
+  call `.venv/bin/python` directly rather than `uv sync` or `uv run`.
+- RoMa (`romatch`) is installed in a separate `~/roma-env` so it cannot change
+  the trainer's PyTorch.
+
+Dataset preparation and dense point clouds: `scripts/pku_dymvhumans/extract_and_convert.py`
+(R2 tar to `data_FreeTimeGS/`) and `scripts/pku_dymvhumans/roma_pointclouds.py`
+(RoMa matches to `pointclouds/*.npy` and the init NPZ).
+
 **Key Features**
 
 - **4D Gaussian Primitives** - Each Gaussian has position, velocity, time, and duration
