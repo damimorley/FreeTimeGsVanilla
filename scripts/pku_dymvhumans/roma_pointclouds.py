@@ -110,10 +110,18 @@ def load_roma(args):
     import torch
     import romatch
 
+    try:
+        import local_corr  # noqa: F401  (optional kernel from romatch[fused-local-corr])
+        use_custom_corr = True
+    except ImportError:
+        use_custom_corr = False
+    print(f"[roma] Local correlation: {'fused CUDA kernel' if use_custom_corr else 'native PyTorch'}")
+
     builder = getattr(romatch, f"roma_{args.model}")
     upsample = tuple(int(x) for x in args.upsample_res.split(","))
     model = builder(device=args.device, coarse_res=args.coarse_res,
-                    upsample_res=upsample if len(upsample) == 2 else upsample[0])
+                    upsample_res=upsample if len(upsample) == 2 else upsample[0],
+                    use_custom_corr=use_custom_corr)
     model.eval()
     torch.set_grad_enabled(False)
     return model
