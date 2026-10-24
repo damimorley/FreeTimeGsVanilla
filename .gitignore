@@ -14,3 +14,14 @@ uv.lock
 .claude/
 *.tsog
 !player/tests/fixtures/tsog/*.tsog
+/pilot_review
+/fullrun_review
+/v2test_review
+/A_review
+/C_review
+/eval_review
+/D_review
+/E_review
+/F_review
+/full_review.tgz
+.DS_Store

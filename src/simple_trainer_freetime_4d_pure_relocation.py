@@ -380,6 +380,13 @@ class Config:
     eval_sample_every: int = 60
     """Evaluate every N-th frame for faster validation (e.g., 300/60 = 5 frames)."""
 
+    eval_only: bool = False
+    """Load --ckpt-path, run validation once and exit without training."""
+
+    eval_matte_dir: Optional[str] = None
+    """Folder of per-camera mattes (<camera>/<frame>.png). If set, validation also
+    reports PSNR over pixels inside the mattes (psnr_fg) and per-image scores."""
+
     # ==================== Model ====================
     sh_degree: int = 3
     """Maximum spherical harmonics degree for view-dependent color."""
@@ -2173,6 +2180,7 @@ class FreeTime4DRunner:
             self.valset, batch_size=1, shuffle=False, collate_fn=skip_none_collate
         )
         metrics = defaultdict(list)
+        per_image = []
         ellipse_time = 0
         eval_count = 0
 
@@ -2226,6 +2234,26 @@ class FreeTime4DRunner:
                 metrics["lpips"].append(self.lpips(colors_p, pixels_p))
                 eval_count += 1
 
+                if cfg.eval_matte_dir is not None:
+                    cam_idx = int(data["camera_idx"][0])
+                    frame_idx = int(data["frame_idx"][0])
+                    cam_name = os.path.basename(self.valset.parser.campaths[cam_idx].rstrip("/"))
+                    matte_path = self.valset._get_image_path(
+                        os.path.join(cfg.eval_matte_dir, cam_name), frame_idx)
+                    matte = torch.from_numpy(np.asarray(imageio.v2.imread(matte_path), dtype=np.float32))
+                    if matte.ndim == 3:
+                        matte = matte[..., 0]
+                    matte = F.interpolate(matte[None, None], size=(height, width), mode="nearest")[0, 0]
+                    fg = (matte.to(device) >= 127.5)
+                    entry = {"index": i, "camera": cam_name, "frame": frame_idx,
+                             "psnr": metrics["psnr"][-1].item()}
+                    if fg.any():
+                        mse_fg = ((colors[0] - pixels[0]) ** 2)[fg].mean()
+                        psnr_fg = -10.0 * torch.log10(mse_fg.clamp_min(1e-10))
+                        metrics["psnr_fg"].append(psnr_fg)
+                        entry["psnr_fg"] = psnr_fg.item()
+                    per_image.append(entry)
+
         if self.world_rank == 0 and eval_count > 0:
             ellipse_time /= eval_count
             stats = {k: torch.stack(v).mean().item() for k, v in metrics.items()}
@@ -2237,8 +2265,13 @@ class FreeTime4DRunner:
                 f"PSNR: {stats['psnr']:.3f}, SSIM: {stats['ssim']:.4f}, LPIPS: {stats['lpips']:.3f} "
                 f"Time: {ellipse_time:.3f}s/img, N: {stats['num_GS']}"
             )
+            if "psnr_fg" in stats:
+                print(f"PSNR inside mattes: {stats['psnr_fg']:.3f} over {len(metrics['psnr_fg'])} images")
             with open(f"{self.stats_dir}/{stage}_step{step:04d}.json", "w") as f:
                 json.dump(stats, f)
+            if per_image:
+                with open(f"{self.stats_dir}/{stage}_step{step:04d}_per_image.json", "w") as f:
+                    json.dump(per_image, f, indent=1)
             for k, v in stats.items():
                 self.writer.add_scalar(f"{stage}/{k}", v, step)
             self.writer.flush()
@@ -2719,6 +2752,10 @@ def main(local_rank: int, world_rank: int, world_size: int, cfg: Config):
     if cfg.export_only:
         # Export mode: just generate PLY and videos from checkpoint
         runner.export_from_checkpoint()
+    elif cfg.eval_only:
+        if cfg.ckpt_path is None:
+            raise ValueError("--eval-only requires --ckpt-path")
+        runner.eval(step=runner.start_step - 1)
     else:
         # Training mode (can resume from checkpoint)
         runner.train()

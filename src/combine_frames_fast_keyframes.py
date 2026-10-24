@@ -452,6 +452,24 @@ def main():
         "--center-weight", type=float, default=2.0,
         help="Weight for center/foreground points (default: 2.0 = 2x boost)"
     )
+    parser.add_argument(
+        "--flow-velocities", action="store_true",
+        help="Use velocities_frameXXXXXX.npy / velocity_valid_frameXXXXXX.npy from "
+             "roma_pointclouds.py --temporal-velocity; k-NN velocity fills the invalid points"
+    )
+    parser.add_argument(
+        "--duration-frames", type=float, default=None,
+        help="Temporal sigma in frames (default: 3x the keyframe gap)"
+    )
+    parser.add_argument(
+        "--speed-duration-size", type=float, default=None,
+        help="World units. If set, sigma (frames) = size / speed per frame, clipped to "
+             "[--min-duration-frames, --duration-frames], so fast points stay short-lived"
+    )
+    parser.add_argument(
+        "--min-duration-frames", type=float, default=0.5,
+        help="Lower clip for --speed-duration-size, in frames"
+    )
 
     args = parser.parse_args()
 
@@ -473,6 +491,8 @@ def main():
     # Duration that bridges the keyframe gap (3x the gap for smooth overlap)
     gap_normalized = args.keyframe_step / time_denominator
     default_duration = gap_normalized * 3  # 3x overlap
+    if args.duration_frames is not None:
+        default_duration = args.duration_frames / time_denominator
 
     print("=" * 70)
     print("COMBINE KEYFRAMES WITH VELOCITY")
@@ -507,6 +527,7 @@ def main():
     # Stats
     total_points = 0
     total_valid_velocity = 0
+    total_flow_velocity = 0
 
     # Process each keyframe
     for i, keyframe in enumerate(tqdm(keyframes, desc="Processing keyframes")):
@@ -522,6 +543,12 @@ def main():
             continue
 
         n_points_original = len(positions)
+        flow_vel = flow_valid = None
+        if args.flow_velocities:
+            vel_path = input_dir / f"velocities_frame{keyframe:06d}.npy"
+            if vel_path.exists():
+                flow_vel = np.load(vel_path)
+                flow_valid = np.load(input_dir / f"velocity_valid_frame{keyframe:06d}.npy")
 
         # Sample if requested
         if args.sample_ratio < 1.0:
@@ -529,6 +556,8 @@ def main():
             idx = np.random.choice(len(positions), n_sample, replace=False)
             positions = positions[idx]
             colors = colors[idx]
+            if flow_vel is not None:
+                flow_vel, flow_valid = flow_vel[idx], flow_valid[idx]
 
         n_points = len(positions)
 
@@ -549,11 +578,23 @@ def main():
             velocities = np.zeros_like(positions)
             valid_mask = np.zeros(n_points, dtype=bool)
             n_valid = 0
+        if flow_vel is not None:
+            velocities[flow_valid] = flow_vel[flow_valid]
+            valid_mask = valid_mask | flow_valid
+            n_valid = valid_mask.sum()
+            total_flow_velocity += int(flow_valid.sum())
 
         # Compute normalized time for this keyframe
         t_normalized = (keyframe - args.frame_start) / time_denominator
         times = np.full((n_points, 1), t_normalized, dtype=np.float32)
         durations = np.full((n_points, 1), default_duration, dtype=np.float32)
+        if args.speed_duration_size is not None:
+            speed = np.linalg.norm(velocities, axis=1)
+            sigma_frames = np.clip(
+                args.speed_duration_size / np.maximum(speed, 1e-9),
+                args.min_duration_frames, default_duration * time_denominator,
+            )
+            durations[valid_mask, 0] = sigma_frames[valid_mask] / time_denominator
 
         # Store
         all_positions.append(positions)
@@ -649,6 +690,12 @@ def main():
         print(f"    Mean: {valid_vel_mag.mean():.6f}")
         print(f"    Max:  {valid_vel_mag.max():.6f}")
         print(f"    Std:  {valid_vel_mag.std():.6f}")
+    if args.flow_velocities:
+        print(f"  Velocities from same-camera matches (before sampling): {total_flow_velocity:,} "
+              f"of {n_total_before_sampling:,}")
+    dur_frames = durations[:, 0] * time_denominator
+    print(f"\nDuration sigma (frames) p10/p50/p90: {np.percentile(dur_frames, 10):.2f}/"
+          f"{np.median(dur_frames):.2f}/{np.percentile(dur_frames, 90):.2f}")
     print(f"\nTime range: [{times.min():.4f}, {times.max():.4f}]")
     print(f"Unique time values: {len(np.unique(times))}")
 
